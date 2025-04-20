@@ -7,7 +7,12 @@ import time
 
 # 환경 변수
 repo = os.getenv('GITHUB_REPOSITORY')
-pr_number = os.getenv('GITHUB_REF').split('/')[-2]
+pr_number = os.getenv('GITHUB_REF', '').split('/')[-2] if os.getenv('GITHUB_REF') else None
+
+# PR 번호가 없으면 직접 설정 (로컬 테스트용)
+if not pr_number or not pr_number.isdigit():
+    pr_number = "9"  # 실제 PR 번호로 변경하세요
+    
 github_token = os.getenv('GITHUB_TOKEN')
 openai_api_key = os.getenv('OPENAI_API_KEY')
 
@@ -34,8 +39,25 @@ def log_debug(message):
 def log_error(message):
     print(f"ERROR: {message}")
 
+# GitHub API 토큰 검증
+def validate_github_token():
+    test_url = f"https://api.github.com/repos/{repo}"
+    log_debug(f"Validating GitHub token with test request to: {test_url}")
+    
+    response = requests.get(test_url, headers=github_headers)
+    if response.status_code == 200:
+        log_info("GitHub token is valid")
+        return True
+    else:
+        log_error(f"GitHub token validation failed (status code: {response.status_code})")
+        log_debug(f"Response: {response.text}")
+        return False
+
 # PR 정보 가져오기 (commit SHA 포함)
 def get_pr_info():
+    log_info(f"Working with repository: {repo}")
+    log_info(f"Working with PR number: {pr_number}")
+    
     pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
     log_debug(f"Fetching PR info from: {pr_url}")
     
@@ -296,6 +318,9 @@ def get_all_comments():
             break
         
         comments = response.json()
+        if DEBUG_MODE and len(comments) > 0:
+            log_debug(f"Sample comment data: {json.dumps(comments[0], indent=2)[:500]}...")
+        
         all_comments.extend(comments)
         
         if len(comments) < per_page:
@@ -325,6 +350,12 @@ def get_all_reviews():
             break
         
         reviews = response.json()
+        if DEBUG_MODE:
+            log_debug(f"Reviews API response status: {response.status_code}")
+            log_debug(f"Reviews API response length: {len(reviews)}")
+            if len(reviews) > 0:
+                log_debug(f"Sample review data: {json.dumps(reviews[0], indent=2)[:500]}...")
+        
         all_reviews.extend(reviews)
         
         if len(reviews) < per_page:
@@ -337,7 +368,12 @@ def get_all_reviews():
 
 # 봇 코멘트인지 확인
 def is_bot_comment(comment):
-    return BOT_SIGNATURE in comment.get('body', '')
+    body = comment.get('body', '')
+    # 디버그용 - 코멘트 본문 확인
+    if len(body) > 0:
+        log_debug(f"Checking comment body (first 100 chars): {body[:100]}")
+        log_debug(f"Bot signature found: {BOT_SIGNATURE in body}")
+    return BOT_SIGNATURE in body
 
 # 봇 코멘트 전체 삭제
 def delete_all_bot_comments():
@@ -371,22 +407,19 @@ def dismiss_all_bot_reviews():
     dismissed_count = 0
     for review in all_reviews:
         review_id = review.get('id')
+        user_login = review.get('user', {}).get('login', '')
+        review_body = review.get('body', '')
+        
+        log_debug(f"Review ID: {review_id}, User: {user_login}, Body starts with: {review_body[:50] if review_body else 'No body'}")
+        
         if not review_id:
             continue
             
-        # 리뷰 세부 정보 가져오기
-        review_detail_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}"
-        detail_response = requests.get(review_detail_url, headers=github_headers)
+        # 봇 리뷰인지 확인 (GitHub Actions 봇 또는 시그니처로 식별)
+        is_bot = (BOT_SIGNATURE in review_body) or (user_login == "github-actions" or user_login == "github-actions[bot]")
         
-        if detail_response.status_code != 200:
-            log_error(f"Failed to get review details for {review_id} (status code: {detail_response.status_code})")
-            continue
-            
-        review_body = detail_response.json().get('body', '')
-        
-        # 봇 리뷰인지 확인
-        if BOT_SIGNATURE in review_body:
-            log_debug(f"Dismissing bot review {review_id}")
+        if is_bot:
+            log_debug(f"Dismissing bot review {review_id} from user {user_login}")
             
             dismiss_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals"
             dismiss_data = {
@@ -489,6 +522,12 @@ def post_review_comments(commit_sha, issues, overall_comment):
 # Main 실행 코드
 try:
     log_info("Starting code review process")
+    log_info(f"Working with repository: {repo}")
+    log_info(f"Working with PR number: {pr_number}")
+    
+    # GitHub 토큰 검증
+    if not validate_github_token():
+        raise Exception("GitHub token validation failed")
     
     # PR 정보 및 diff 가져오기
     pr_info = get_pr_info()
