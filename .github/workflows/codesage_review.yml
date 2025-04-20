@@ -4,6 +4,11 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+# 권한 설정 추가
+permissions:
+  contents: read
+  pull-requests: write # PR에 코멘트 달기 위한 권한
+
 jobs:
   review:
     runs-on: ubuntu-latest
