@@ -42,7 +42,31 @@ print(f"Review target diff:\n{diff}")
 
 # OpenAI client
 openai_client = OpenAI(api_key=openai_api_key)
-prompt = f"Review the following code changes and provide feedback on security, performance, and quality:\n\n{diff}"
+prompt = f"""Review the following code changes thoroughly and critically. Look for ALL possible issues including:
+
+1. SECURITY: Identify vulnerabilities like injection risks, unsafe functions (eval, exec), authentication issues, etc.
+
+2. PERFORMANCE: Find inefficient code patterns, unnecessary operations, memory leaks, or resource management issues.
+
+3. LOGICAL ERRORS: Detect incorrect algorithm implementations, parameter order issues, incorrect calculations or comparisons.
+
+4. FUNCTIONAL CORRECTNESS: Check if implementations match their descriptions (docstrings), verify return values.
+
+5. CODE STRUCTURE: Identify redundant code, opportunities for method reuse, excessive complexity.
+
+6. CODE QUALITY: Find unused variables, naming issues, missing error handling, or incomplete implementations.
+
+7. SUBTLE BUGS: Look for floating-point precision issues, off-by-one errors, or other non-obvious bugs.
+
+Be thorough and detail-oriented. Don't overlook minor issues that could become major problems. For each issue:
+- Clearly describe what's wrong
+- Explain why it's a problem 
+- Provide a specific recommendation to fix it
+- If applicable, include example code
+
+Here are the code changes to review:
+
+{diff}"""
 response = openai_client.chat.completions.create(
     model="gpt-4.1",
     messages=[{"role": "user", "content": prompt}],
