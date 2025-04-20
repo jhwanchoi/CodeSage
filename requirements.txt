@@ -1,3 +1,2 @@
 openai
-requests
-modelcontextprotocol 
+requests 

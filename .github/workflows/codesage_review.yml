@@ -18,12 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-
-      - name: Run MCP server
-        run: |
-          python mcp_server.py &
-          sleep 5
+          pip install openai requests
 
       - name: Run code review script
         env:
