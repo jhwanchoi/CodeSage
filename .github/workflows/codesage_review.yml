@@ -18,7 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install openai requests modelcontextprotocol
+          pip install -r requirements.txt
 
       - name: Run MCP server
         run: |
