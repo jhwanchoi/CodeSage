@@ -3,7 +3,6 @@ import json
 
 class CodeSageMCPServer(FastMCPServer):
     async def get_diff(self, pr_number: str) -> str:
-        # GitHub API로 diff 가져오기 (예시)
         diff = (
             "diff --git a/file.py b/file.py\n"
             "--- a/file.py\n"
@@ -12,7 +11,6 @@ class CodeSageMCPServer(FastMCPServer):
             "- print('Hello')\n"
             "+ print('Hello, World!')"
         )
-        return diff
 
 server = CodeSageMCPServer()
 server.register_resource("get_diff", server.get_diff)
