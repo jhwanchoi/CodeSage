@@ -180,13 +180,18 @@ def parse_ai_response(response_text, file_changes):
     issue_pattern = r'(?:이슈|Issue):\s*([^\n]+)'
     fix_pattern = r'(?:해결|Fix):\s*([^\n]+)'
     
-    # 모든 이슈 항목 찾기 (- 또는 숫자로 시작하는 항목)
-    issue_blocks = re.split(r'\n(?=-|\d+\.|\*)\s*', response_text, re.DOTALL)
+    log_debug(f"Starting to parse response text of length: {len(response_text)}")
     
-    for block in issue_blocks:
+    # 모든 이슈 항목 찾기 (- 또는 숫자로 시작하는 항목)
+    issue_blocks = re.split(r'\n(?=-|\d+\.|\*)\s*', response_text)
+    log_debug(f"Found {len(issue_blocks)} issue blocks")
+    
+    for i, block in enumerate(issue_blocks):
         if not block.strip():
             continue
             
+        log_debug(f"Processing issue block {i+1}: {block[:100]}...")
+        
         file_match = re.search(file_line_pattern, block, re.IGNORECASE)
         type_match = re.search(type_pattern, block, re.IGNORECASE)
         issue_match = re.search(issue_pattern, block, re.IGNORECASE)
@@ -197,8 +202,24 @@ def parse_ai_response(response_text, file_changes):
             line_num = int(file_match.group(2)) if file_match.group(2) else None
             
             issue_type = type_match.group(1).strip() if type_match else "일반"
-            description = issue_match.group(1).strip() if issue_match else block.strip()
+            description = issue_match.group(1).strip() if issue_match else "이슈가 감지되었습니다."
             fix = fix_match.group(1).strip() if fix_match else ""
+            
+            # 블록에서 파일/라인/유형 행을 제외한 나머지 텍스트를 설명으로 사용
+            if not description or description == "이슈가 감지되었습니다.":
+                # 파일, 라인, 유형, 이슈, 해결 키워드로 시작하는 행을 제외한 나머지 텍스트
+                description_lines = []
+                for line in block.split('\n'):
+                    line = line.strip()
+                    if not line or re.match(r'^(?:파일|File|유형|Type|이슈|Issue|해결|Fix):', line, re.IGNORECASE):
+                        continue
+                    description_lines.append(line)
+                
+                if description_lines:
+                    description = " ".join(description_lines)
+            
+            log_debug(f"Parsed issue: file={file_path}, line={line_num}, type={issue_type}")
+            log_debug(f"Description: {description[:100]}..." if len(description) > 100 else f"Description: {description}")
             
             issues.append({
                 'type': issue_type,
@@ -210,12 +231,14 @@ def parse_ai_response(response_text, file_changes):
     
     # 파일 및 라인 번호가 없는 경우 처리
     if not issues:
-        log_debug("Failed to parse issues from response, trying alternative method")
+        log_debug("Failed to parse issues using primary method, trying alternative method")
         
         # 단순 텍스트 기반으로 이슈 분리 시도
         items = re.findall(r'\n\d+\.\s+(.*?)(?=\n\d+\.|\Z)', response_text, re.DOTALL)
         if not items:
             items = re.findall(r'\n-\s+(.*?)(?=\n-|\Z)', response_text, re.DOTALL)
+        
+        log_debug(f"Alternative method found {len(items)} items")
         
         for item in items:
             # 파일명과 라인 번호 추출 시도
@@ -227,11 +250,16 @@ def parse_ai_response(response_text, file_changes):
             
             issues.append({
                 'type': 'Issue',
-                'description': item.strip(),
+                'description': item.strip() or "이슈가 감지되었습니다.",
                 'recommendation': '',
                 'file': file_path,
                 'line': line_num
             })
+    
+    # 이슈 설명이 없는 경우 기본 메시지 설정
+    for issue in issues:
+        if not issue.get('description') or issue['description'].strip() == "":
+            issue['description'] = "이슈가 감지되었습니다."
     
     return issues
 
@@ -433,10 +461,19 @@ def post_review_comments(commit_sha, issues, overall_comment):
     for issue in issues:
         if issue.get('file') and issue.get('line'):
             comment_body = f"{BOT_SIGNATURE}\n\n**{issue['type']}**\n\n"
-            comment_body += f"{issue['description']}\n\n"
             
-            if issue.get('recommendation'):
-                comment_body += f"**해결 방법:**\n{issue['recommendation']}"
+            # 설명이 없거나 비어있는 경우 기본 메시지 사용
+            description = issue.get('description', '').strip()
+            if not description:
+                description = "이 라인에 코드 이슈가 감지되었습니다."
+            
+            comment_body += f"{description}\n\n"
+            
+            recommendation = issue.get('recommendation', '').strip()
+            if recommendation:
+                comment_body += f"**해결 방법:**\n{recommendation}"
+            else:
+                comment_body += "**해결 방법:**\n코드를 검토하고 적절히 수정해주세요."
             
             comments.append({
                 'path': issue['file'],
@@ -445,6 +482,9 @@ def post_review_comments(commit_sha, issues, overall_comment):
             })
     
     log_debug(f"Prepared {len(comments)} inline comments")
+    for i, comment in enumerate(comments):
+        log_debug(f"Comment {i+1} - Path: {comment['path']}, Position: {comment['position']}")
+        log_debug(f"Comment body preview: {comment['body'][:150]}...")
     
     # 리뷰 데이터 구성
     review_data = {
@@ -515,6 +555,7 @@ try:
 2. 중요도 순서로 최대 5개 이슈만 알려주세요.
 3. 장황한 설명이나 여러 코드 예제는 필요 없습니다.
 4. 파일명과 라인 번호를 꼭 명시해 주세요.
+5. 모든 이슈에 설명과 해결 방법을 필수로 작성해 주세요.
 
 다음 코드 변경 사항을 리뷰하세요:
 
@@ -531,6 +572,15 @@ try:
     # OpenAI 응답 파싱
     issues = parse_ai_response(review_comment, file_changes)
     log_info(f"Parsed {len(issues)} issues from OpenAI response")
+    
+    # 각 이슈 정보 로깅
+    for i, issue in enumerate(issues):
+        log_debug(f"Issue {i+1}:")
+        log_debug(f"  File: {issue.get('file')}")
+        log_debug(f"  Line: {issue.get('line')}")
+        log_debug(f"  Type: {issue.get('type')}")
+        log_debug(f"  Description: {issue.get('description')[:100]}..." if issue.get('description') and len(issue.get('description')) > 100 else f"  Description: {issue.get('description')}")
+        log_debug(f"  Recommendation: {issue.get('recommendation')[:100]}..." if issue.get('recommendation') and len(issue.get('recommendation')) > 100 else f"  Recommendation: {issue.get('recommendation')}")
     
     # 리뷰 코멘트 게시
     log_info("Posting review comments")
