@@ -317,6 +317,103 @@ def get_all_comments():
     log_info(f"Retrieved {len(all_comments)} total PR comments")
     return all_comments
 
+# 모든 인라인 코멘트(리뷰 코멘트) 가져오기
+def get_all_review_comments():
+    comments_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments"
+    log_debug(f"Fetching all PR review comments from: {comments_url}")
+    
+    all_comments = []
+    page = 1
+    per_page = 100
+    
+    while True:
+        params = {'per_page': per_page, 'page': page}
+        response = requests.get(comments_url, headers=github_headers, params=params)
+        
+        if response.status_code != 200:
+            log_error(f"Failed to get review comments (status code: {response.status_code})")
+            log_debug(f"Response: {response.text}")
+            break
+        
+        comments = response.json()
+        if DEBUG_MODE and len(comments) > 0:
+            log_debug(f"Sample review comment data: {json.dumps(comments[0], indent=2)[:500]}...")
+        
+        all_comments.extend(comments)
+        
+        if len(comments) < per_page:
+            break
+            
+        page += 1
+    
+    log_info(f"Retrieved {len(all_comments)} total PR review comments")
+    return all_comments
+
+# 봇 코멘트인지 확인
+def is_bot_comment(comment):
+    body = comment.get('body', '')
+    user_login = comment.get('user', {}).get('login', '')
+    # 디버그용 - 코멘트 본문 확인
+    if len(body) > 0:
+        log_debug(f"Checking comment body (first 100 chars): {body[:100]}")
+        log_debug(f"Bot signature found: {BOT_SIGNATURE in body}")
+    return (BOT_SIGNATURE in body) or (user_login == "github-actions" or user_login == "github-actions[bot]")
+
+# 인라인 코멘트(리뷰 코멘트) 전체 삭제
+def delete_all_bot_review_comments():
+    all_comments = get_all_review_comments()
+    log_info(f"Checking {len(all_comments)} review comments for deletion")
+    
+    deleted_count = 0
+    for comment in all_comments:
+        comment_id = comment.get('id')
+        if comment_id and is_bot_comment(comment):
+            log_debug(f"Deleting bot review comment {comment_id}")
+            
+            delete_url = f"https://api.github.com/repos/{repo}/pulls/comments/{comment_id}"
+            response = requests.delete(delete_url, headers=github_headers)
+            
+            if response.status_code == 204:  # 204 No Content는 성공적인 삭제를 의미
+                log_info(f"Successfully deleted review comment {comment_id}")
+                deleted_count += 1
+            else:
+                log_error(f"Failed to delete review comment {comment_id} (status code: {response.status_code})")
+                log_debug(f"Response: {response.text}")
+    
+    log_info(f"Deleted {deleted_count} bot review comments")
+    return deleted_count
+
+# 일반 PR 코멘트는 중복 처리 (Outdated로 표시)
+def mark_comments_as_outdated():
+    all_comments = get_all_comments()
+    log_info(f"Checking {len(all_comments)} comments for marking as outdated")
+    
+    marked_count = 0
+    for comment in all_comments:
+        comment_id = comment.get('id')
+        body = comment.get('body', '')
+        
+        if comment_id and is_bot_comment(comment) and "OUTDATED" not in body:
+            log_debug(f"Marking bot comment {comment_id} as outdated")
+            
+            # 코멘트 본문에 "OUTDATED" 표시 추가
+            updated_body = f"{body}\n\n**OUTDATED**: 새로운 리뷰가 생성되었습니다."
+            
+            update_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
+            update_data = {'body': updated_body}
+            
+            response = requests.patch(update_url, headers=github_headers, json=update_data)
+            
+            if response.status_code == 200:
+                log_info(f"Successfully marked comment {comment_id} as outdated")
+                marked_count += 1
+            else:
+                log_error(f"Failed to mark comment {comment_id} as outdated (status code: {response.status_code})")
+                log_debug(f"Response: {response.text}")
+    
+    log_info(f"Marked {marked_count} bot comments as outdated")
+    return marked_count
+
 # 모든 기존 PR 리뷰 가져오기 (삭제 대상)
 def get_all_reviews():
     reviews_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
@@ -351,39 +448,6 @@ def get_all_reviews():
     
     log_info(f"Retrieved {len(all_reviews)} total PR reviews")
     return all_reviews
-
-# 봇 코멘트인지 확인
-def is_bot_comment(comment):
-    body = comment.get('body', '')
-    # 디버그용 - 코멘트 본문 확인
-    if len(body) > 0:
-        log_debug(f"Checking comment body (first 100 chars): {body[:100]}")
-        log_debug(f"Bot signature found: {BOT_SIGNATURE in body}")
-    return BOT_SIGNATURE in body
-
-# 봇 코멘트 전체 삭제
-def delete_all_bot_comments():
-    all_comments = get_all_comments()
-    log_info(f"Checking {len(all_comments)} comments for deletion")
-    
-    deleted_count = 0
-    for comment in all_comments:
-        comment_id = comment.get('id')
-        if comment_id and is_bot_comment(comment):
-            log_debug(f"Deleting bot comment {comment_id}")
-            
-            delete_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
-            response = requests.delete(delete_url, headers=github_headers)
-            
-            if response.status_code == 204:  # 204 No Content는 성공적인 삭제를 의미
-                log_info(f"Successfully deleted comment {comment_id}")
-                deleted_count += 1
-            else:
-                log_error(f"Failed to delete comment {comment_id} (status code: {response.status_code})")
-                log_debug(f"Response: {response.text}")
-    
-    log_info(f"Deleted {deleted_count} bot comments")
-    return deleted_count
 
 # 봇 리뷰 전체 삭제/dismiss
 def dismiss_all_bot_reviews():
@@ -434,17 +498,21 @@ def post_review_comments(commit_sha, issues, overall_comment):
     # 이전 봇 코멘트/리뷰 삭제
     log_info("Starting cleanup of previous bot comments and reviews")
     try:
-        # 기존 봇 코멘트 모두 삭제
-        deleted_comments = delete_all_bot_comments()
-        log_info(f"Deleted {deleted_comments} bot comments")
+        # 기존 봇 인라인 코멘트(리뷰 코멘트) 모두 삭제
+        deleted_review_comments = delete_all_bot_review_comments()
+        log_info(f"Deleted {deleted_review_comments} bot review comments")
+        
+        # 기존 일반 코멘트는 중복으로 표시
+        marked_comments = mark_comments_as_outdated()
+        log_info(f"Marked {marked_comments} bot comments as outdated")
         
         # 기존 봇 리뷰 모두 dismiss
         dismissed_reviews = dismiss_all_bot_reviews()
         log_info(f"Dismissed {dismissed_reviews} bot reviews")
         
         # 삭제 작업 후 약간의 대기 시간 추가 (GitHub API 반영 시간 고려)
-        if deleted_comments > 0 or dismissed_reviews > 0:
-            log_info("Waiting for GitHub API to process deletions...")
+        if deleted_review_comments > 0 or dismissed_reviews > 0 or marked_comments > 0:
+            log_info("Waiting for GitHub API to process changes...")
             time.sleep(2)
     except Exception as e:
         log_error(f"Error cleaning up previous comments/reviews: {str(e)}")
