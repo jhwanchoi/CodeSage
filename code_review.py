@@ -10,6 +10,9 @@ pr_number = os.getenv('GITHUB_REF').split('/')[-2]
 github_token = os.getenv('GITHUB_TOKEN')
 openai_api_key = os.getenv('OPENAI_API_KEY')
 
+# 봇 식별자 - 리뷰에 추가될 태그
+BOT_SIGNATURE = "<!-- auto-review-bot -->"
+
 # GitHub API 헤더
 github_headers = {
     'Authorization': f'Bearer {github_token}',
@@ -227,7 +230,7 @@ def parse_ai_response(response_text, file_changes):
 # 이슈 요약 생성 함수
 def generate_summary(issues):
     if not issues:
-        return "코드 리뷰 완료: 이슈가 발견되지 않았습니다."
+        return f"{BOT_SIGNATURE}\n\n# 코드 리뷰 요약\n\n코드 리뷰 완료: 이슈가 발견되지 않았습니다."
     
     issue_types = {}
     for issue in issues:
@@ -237,7 +240,7 @@ def generate_summary(issues):
         else:
             issue_types[category] = 1
     
-    summary = "# 코드 리뷰 요약\n\n"
+    summary = f"{BOT_SIGNATURE}\n\n# 코드 리뷰 요약\n\n"
     summary += "다음과 같은 이슈가 발견되었습니다:\n\n"
     
     for category, count in issue_types.items():
@@ -246,8 +249,106 @@ def generate_summary(issues):
     summary += "\n각 이슈에 대한 상세 내용은 인라인 코멘트를 참조하세요."
     return summary
 
+# 기존 봇 리뷰 가져오기
+def get_existing_bot_reviews():
+    reviews_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
+    response = requests.get(reviews_url, headers=github_headers)
+    
+    if response.status_code != 200:
+        print(f"Failed to get existing reviews (status code: {response.status_code})")
+        return []
+    
+    reviews = response.json()
+    bot_reviews = []
+    
+    # 코멘트 내용 가져오기
+    for review in reviews:
+        review_id = review.get('id')
+        if not review_id:
+            continue
+            
+        # 리뷰 코멘트 가져오기
+        comments_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}"
+        comments_response = requests.get(comments_url, headers=github_headers)
+        
+        if comments_response.status_code == 200:
+            review_data = comments_response.json()
+            body = review_data.get('body', '')
+            
+            # 봇 시그니처가 포함된 리뷰 식별
+            if BOT_SIGNATURE in body:
+                bot_reviews.append(review_id)
+    
+    return bot_reviews
+
+# 봇 리뷰 삭제하기
+def delete_bot_reviews(review_ids):
+    for review_id in review_ids:
+        # GitHub API는 리뷰 자체를 삭제하는 엔드포인트를 제공하지 않으므로 
+        # 리뷰를 숨기거나 (dismiss) 빈 내용으로 업데이트하는 방식 사용
+        dismiss_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals"
+        dismiss_data = {
+            'message': '이전 자동 리뷰를 대체합니다.',
+            'event': 'DISMISS'
+        }
+        
+        response = requests.put(dismiss_url, headers=github_headers, json=dismiss_data)
+        if response.status_code == 200:
+            print(f"Successfully dismissed review {review_id}")
+        else:
+            print(f"Failed to dismiss review {review_id} (status code: {response.status_code})")
+            print(f"Error details: {response.text}")
+
+# 일반 PR 코멘트 처리
+def get_existing_bot_comments():
+    comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+    response = requests.get(comments_url, headers=github_headers)
+    
+    if response.status_code != 200:
+        print(f"Failed to get existing comments (status code: {response.status_code})")
+        return []
+    
+    comments = response.json()
+    bot_comments = []
+    
+    for comment in comments:
+        comment_id = comment.get('id')
+        body = comment.get('body', '')
+        
+        if BOT_SIGNATURE in body:
+            bot_comments.append(comment_id)
+    
+    return bot_comments
+
+# 봇 코멘트 삭제하기
+def delete_bot_comments(comment_ids):
+    for comment_id in comment_ids:
+        delete_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
+        response = requests.delete(delete_url, headers=github_headers)
+        
+        if response.status_code == 204:  # 204 No Content는 성공적인 삭제를 의미
+            print(f"Successfully deleted comment {comment_id}")
+        else:
+            print(f"Failed to delete comment {comment_id} (status code: {response.status_code})")
+
 # GitHub PR에 인라인 코멘트 남기기
 def post_review_comments(commit_sha, issues, overall_comment):
+    # 이전 봇 리뷰 삭제
+    try:
+        # 기존 봇 리뷰 가져오기
+        bot_reviews = get_existing_bot_reviews()
+        if bot_reviews:
+            print(f"Found {len(bot_reviews)} existing bot reviews")
+            delete_bot_reviews(bot_reviews)
+        
+        # 기존 봇 코멘트 가져오기
+        bot_comments = get_existing_bot_comments()
+        if bot_comments:
+            print(f"Found {len(bot_comments)} existing bot comments")
+            delete_bot_comments(bot_comments)
+    except Exception as e:
+        print(f"Error cleaning up previous reviews/comments: {str(e)}")
+    
     # 리뷰 생성
     review_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
     
@@ -258,7 +359,7 @@ def post_review_comments(commit_sha, issues, overall_comment):
     comments = []
     for issue in issues:
         if issue.get('file') and issue.get('line'):
-            comment_body = f"**{issue['type']}**\n\n"
+            comment_body = f"{BOT_SIGNATURE}\n\n**{issue['type']}**\n\n"
             comment_body += f"{issue['description']}\n\n"
             
             if issue.get('why'):
@@ -287,7 +388,7 @@ def post_review_comments(commit_sha, issues, overall_comment):
     # 인라인 코멘트가 없으면 일반 PR 코멘트로 대체
     if not comments:
         comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-        comment_data = {'body': overall_comment}
+        comment_data = {'body': f"{BOT_SIGNATURE}\n\n{overall_comment}"}
         response = requests.post(comment_url, headers=github_headers, json=comment_data)
         print(f"Comment posting result: {response.status_code}")
         return
@@ -381,7 +482,7 @@ except Exception as e:
     # 오류 발생 시, 기존 방식으로 일반 코멘트 게시 (fallback)
     try:
         comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-        comment_data = {'body': f"Code review failed: {str(e)}\n\nIf available, here's the review:\n\n{review_comment if 'review_comment' in locals() else 'No review available'}"} 
+        comment_data = {'body': f"{BOT_SIGNATURE}\n\nCode review failed: {str(e)}\n\nIf available, here's the review:\n\n{review_comment if 'review_comment' in locals() else 'No review available'}"} 
         response = requests.post(comment_url, headers=github_headers, json=comment_data)
         print(f"Fallback comment posting result: {response.status_code}")
     except Exception as fallback_e:
