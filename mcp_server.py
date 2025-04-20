@@ -12,7 +12,6 @@ class CodeSageMCPServer(FastMCPServer):
             "- print('Hello')\n"
             "+ print('Hello, World!')"
         )
-        return diff
 
 server = CodeSageMCPServer()
 server.register_resource("get_diff", server.get_diff)

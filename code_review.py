@@ -41,7 +41,7 @@ except Exception as e:
 print(f"Review target diff:\n{diff}")
 
 # OpenAI client
-openai_client = OpenAI(api_key=openai_api_key)
+
 prompt = f"Review the following code changes and provide feedback on security, performance, and quality:\n\n{diff}"
 response = openai_client.chat.completions.create(
     model="gpt-4.1",
