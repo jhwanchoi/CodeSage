@@ -202,11 +202,11 @@ def parse_ai_response(response_text, file_changes):
             line_num = int(file_match.group(2)) if file_match.group(2) else None
             
             issue_type = type_match.group(1).strip() if type_match else "일반"
-            description = issue_match.group(1).strip() if issue_match else "이슈가 감지되었습니다."
-            fix = fix_match.group(1).strip() if fix_match else ""
+            description = issue_match.group(1).strip() if issue_match else None
+            fix = fix_match.group(1).strip() if fix_match else None
             
             # 블록에서 파일/라인/유형 행을 제외한 나머지 텍스트를 설명으로 사용
-            if not description or description == "이슈가 감지되었습니다.":
+            if not description:
                 # 파일, 라인, 유형, 이슈, 해결 키워드로 시작하는 행을 제외한 나머지 텍스트
                 description_lines = []
                 for line in block.split('\n'):
@@ -217,6 +217,32 @@ def parse_ai_response(response_text, file_changes):
                 
                 if description_lines:
                     description = " ".join(description_lines)
+            
+            # 여전히 설명이 없는 경우, 이슈 유형에 따라 기본 설명 추가
+            if not description:
+                if issue_type.lower() in ["보안", "security"]:
+                    description = "이 코드에 보안 취약점이 발견되었습니다. 입력 검증이나 안전하지 않은 함수 사용을 확인하세요."
+                elif issue_type.lower() in ["성능", "performance"]:
+                    description = "성능 이슈가 발견되었습니다. 비효율적인 연산이나 불필요한 반복이 있는지 확인하세요."
+                elif issue_type.lower() in ["논리", "logical"]:
+                    description = "논리적 오류가 발견되었습니다. 알고리즘 로직, 조건문, 반환값 등을 확인하세요."
+                elif issue_type.lower() in ["품질", "quality"]:
+                    description = "코드 품질 문제가 발견되었습니다. 중복 코드, 명명 규칙, 미사용 변수 등을 확인하세요."
+                else:
+                    description = "이 라인에 코드 이슈가 감지되었습니다. 구현 방식과 로직을 검토하세요."
+            
+            # 해결 방법이 없는 경우, 이슈 유형에 따라 기본 해결 방법 추가
+            if not fix:
+                if issue_type.lower() in ["보안", "security"]:
+                    fix = "입력 데이터를 검증하고, 안전한 함수를 사용하세요. eval() 대신 ast.literal_eval()을 고려해 보세요."
+                elif issue_type.lower() in ["성능", "performance"]:
+                    fix = "중복 연산을 제거하고, 데이터 구조와 알고리즘을 최적화하세요."
+                elif issue_type.lower() in ["논리", "logical"]:
+                    fix = "알고리즘 로직을 검토하고, 조건문과 계산 순서가 올바른지 확인하세요."
+                elif issue_type.lower() in ["품질", "quality"]:
+                    fix = "코드 재사용을 고려하고, 명명 규칙을 따르며, 불필요한 변수와 코드를 제거하세요."
+                else:
+                    fix = "코드를 검토하고 발견된 문제를 수정하세요."
             
             log_debug(f"Parsed issue: file={file_path}, line={line_num}, type={issue_type}")
             log_debug(f"Description: {description[:100]}..." if len(description) > 100 else f"Description: {description}")
@@ -248,18 +274,39 @@ def parse_ai_response(response_text, file_changes):
             file_path = file_match.group(1) if file_match else list(file_changes.keys())[0] if file_changes else None
             line_num = int(line_match.group(1)) if line_match else None
             
+            # 텍스트 분석으로 이슈 유형 추론
+            issue_type = "일반"
+            if re.search(r'보안|security|취약|vulnerable|injection|eval|exec', item, re.IGNORECASE):
+                issue_type = "보안"
+            elif re.search(r'성능|performance|효율|효과|비효율|slow|느린|최적화|optimize', item, re.IGNORECASE):
+                issue_type = "성능"
+            elif re.search(r'논리|logic|계산|calculation|알고리즘|algorithm|조건|condition', item, re.IGNORECASE):
+                issue_type = "논리"
+            elif re.search(r'품질|quality|코드|code|중복|duplicate|명명|naming|변수|variable', item, re.IGNORECASE):
+                issue_type = "품질"
+                
+            # 유형에 따른 설명과 해결책 생성
+            description = item.strip()
+            recommendation = ""
+            
+            if issue_type == "보안":
+                recommendation = "보안 취약점을 해결하기 위해 입력 검증 및 안전한 API를 사용하세요."
+            elif issue_type == "성능":
+                recommendation = "알고리즘 최적화 및 불필요한 연산 제거를 통해 성능을 개선하세요."
+            elif issue_type == "논리":
+                recommendation = "조건문, 계산식, 알고리즘 로직을 검토하고 수정하세요."
+            elif issue_type == "품질":
+                recommendation = "코드 중복 제거, 명명 규칙 준수, 미사용 코드 정리 등으로 품질을 높이세요."
+            else:
+                recommendation = "코드를 검토하고 발견된 문제를 수정하세요."
+            
             issues.append({
-                'type': 'Issue',
-                'description': item.strip() or "이슈가 감지되었습니다.",
-                'recommendation': '',
+                'type': issue_type,
+                'description': description,
+                'recommendation': recommendation,
                 'file': file_path,
                 'line': line_num
             })
-    
-    # 이슈 설명이 없는 경우 기본 메시지 설정
-    for issue in issues:
-        if not issue.get('description') or issue['description'].strip() == "":
-            issue['description'] = "이슈가 감지되었습니다."
     
     return issues
 
@@ -533,7 +580,16 @@ def post_review_comments(commit_sha, issues, overall_comment):
             # 설명이 없거나 비어있는 경우 기본 메시지 사용
             description = issue.get('description', '').strip()
             if not description:
-                description = "이 라인에 코드 이슈가 감지되었습니다."
+                if issue['type'].lower() in ["보안", "security"]:
+                    description = "이 코드에 보안 취약점이 발견되었습니다. 입력 검증이나 안전하지 않은 함수 사용을 확인하세요."
+                elif issue['type'].lower() in ["성능", "performance"]:
+                    description = "성능 이슈가 발견되었습니다. 비효율적인 연산이나 불필요한 반복이 있는지 확인하세요."
+                elif issue['type'].lower() in ["논리", "logical"]:
+                    description = "논리적 오류가 발견되었습니다. 알고리즘 로직, 조건문, 반환값 등을 확인하세요."
+                elif issue['type'].lower() in ["품질", "quality"]:
+                    description = "코드 품질 문제가 발견되었습니다. 중복 코드, 명명 규칙, 미사용 변수 등을 확인하세요."
+                else:
+                    description = "이 라인에 코드 이슈가 감지되었습니다. 구현 방식과 로직을 검토하세요."
             
             comment_body += f"{description}\n\n"
             
@@ -541,7 +597,16 @@ def post_review_comments(commit_sha, issues, overall_comment):
             if recommendation:
                 comment_body += f"**해결 방법:**\n{recommendation}"
             else:
-                comment_body += "**해결 방법:**\n코드를 검토하고 적절히 수정해주세요."
+                if issue['type'].lower() in ["보안", "security"]:
+                    comment_body += "**해결 방법:**\n입력 데이터를 검증하고, 안전한 함수를 사용하세요. eval() 대신 ast.literal_eval()을 고려해 보세요."
+                elif issue['type'].lower() in ["성능", "performance"]:
+                    comment_body += "**해결 방법:**\n중복 연산을 제거하고, 데이터 구조와 알고리즘을 최적화하세요."
+                elif issue['type'].lower() in ["논리", "logical"]:
+                    comment_body += "**해결 방법:**\n알고리즘 로직을 검토하고, 조건문과 계산 순서가 올바른지 확인하세요."
+                elif issue['type'].lower() in ["품질", "quality"]:
+                    comment_body += "**해결 방법:**\n코드 재사용을 고려하고, 명명 규칙을 따르며, 불필요한 변수와 코드를 제거하세요."
+                else:
+                    comment_body += "**해결 방법:**\n코드를 면밀히 검토하고 발견된 문제를 수정하세요."
             
             comments.append({
                 'path': issue['file'],
@@ -617,13 +682,14 @@ try:
 1. 각 문제점에 대해 다음 형식을 사용하세요:
 - 파일: [파일명], 라인: [라인번호]
 - 유형: [보안/성능/논리/품질] 중 선택
-- 이슈: [한 문장으로 문제 설명]
-- 해결: [한 문장으로 해결 방법]
+- 이슈: [문제에 대한 상세한 설명 - 무엇이 문제인지, 왜 문제인지 설명]
+- 해결: [구체적인 해결 방법 - 어떻게 수정해야 하는지 명확히 설명]
 
 2. 중요도 순서로 최대 5개 이슈만 알려주세요.
 3. 장황한 설명이나 여러 코드 예제는 필요 없습니다.
 4. 파일명과 라인 번호를 꼭 명시해 주세요.
-5. 모든 이슈에 설명과 해결 방법을 필수로 작성해 주세요.
+5. 모든 이슈에 구체적인 설명과 실용적인 해결 방법을 필수로 작성해 주세요.
+6. 단순히 "이슈가 있습니다"와 같은 모호한 설명은 피하고 구체적으로 적어주세요.
 
 다음 코드 변경 사항을 리뷰하세요:
 
