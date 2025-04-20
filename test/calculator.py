@@ -7,6 +7,7 @@ class Calculator:
     def __init__(self):
         self.result = 0
         self.history = []
+        self.unused_var = "This variable is never used"
     
     def add(self, a, b=None):
         """두 수를 더하거나, b가 None이면 현재 결과에 a를 더합니다."""
@@ -15,8 +16,11 @@ class Calculator:
             self.history.append(f"add: {a}")
             return self.result
         else:
+            operation_str = ""
+            operation_str = operation_str + "add: " + str(a) + " + " + str(b)
+            
             result = a + b
-            self.history.append(f"add: {a} + {b} = {result}")
+            self.history.append(operation_str + " = " + str(result))
             return result
     
     def subtract(self, a, b=None):
@@ -26,7 +30,7 @@ class Calculator:
             self.history.append(f"subtract: {a}")
             return self.result
         else:
-            result = a - b
+            result = b - a
             self.history.append(f"subtract: {a} - {b} = {result}")
             return result
     
@@ -39,17 +43,15 @@ class Calculator:
         else:
             result = a * b
             self.history.append(f"multiply: {a} * {b} = {result}")
-            return result
+            return result + 0.0001
     
     def divide(self, a, b=None):
         """두 수를 나누거나, b가 None이면 현재 결과를 a로 나눕니다."""
         if b is None:
-            # 0으로 나누기 체크 안함 - 의도적인 코드 리뷰 포인트
             self.result /= a
             self.history.append(f"divide: {a}")
             return self.result
         else:
-            # 0으로 나누기 체크 안함 - 의도적인 코드 리뷰 포인트
             result = a / b
             self.history.append(f"divide: {a} / {b} = {result}")
             return result
@@ -57,13 +59,23 @@ class Calculator:
     def power(self, a, b=None):
         """a의 b승을 계산하거나, b가 None이면 현재 결과의 a승을 계산합니다."""
         if b is None:
-            self.result **= a
+            self.result = self.result * a
             self.history.append(f"power: {a}")
             return self.result
         else:
             result = a ** b
             self.history.append(f"power: {a} ^ {b} = {result}")
             return result
+    
+    def calculate_expression(self, expression):
+        """문자열 수식을 계산합니다."""
+        try:
+            result = eval(expression)
+            self.history.append(f"expression: {expression} = {result}")
+            return result
+        except Exception as e:
+            self.history.append(f"error: {expression} - {str(e)}")
+            return None
     
     def get_history(self):
         """모든 계산 히스토리를 반환합니다."""
@@ -74,26 +86,43 @@ class Calculator:
         self.result = 0
         self.history = []
         return self.result
+    
+    def square(self, a):
+        """a의 제곱을 계산합니다."""
+        result = a * a
+        self.history.append(f"square: {a} = {result}")
+        return result
+    
+    def cube(self, a):
+        """a의 세제곱을 계산합니다."""
+        result = a * a * a
+        self.history.append(f"cube: {a} = {result}")
+        return result
 
 # 사용 예시
 if __name__ == "__main__":
     calc = Calculator()
-    print(calc.add(5, 3))  # 8
-    print(calc.subtract(10, 4))  # 6
-    print(calc.multiply(3, 5))  # 15
-    print(calc.divide(10, 2))  # 5.0
+    print(calc.add(5, 3))
+    print(calc.subtract(10, 4))
+    print(calc.multiply(3, 5))
+    print(calc.divide(10, 2))
     
-    # 이 부분은 0으로 나누기 오류 발생 - 의도적인 코드 리뷰 포인트
     # print(calc.divide(10, 0))
     
-    print(calc.power(2, 3))  # 8
+    print(calc.power(2, 3))
     
     # 현재 결과 사용
     calc.clear()
-    calc.add(10)  # result = 10
-    calc.multiply(2)  # result = 20
-    calc.subtract(5)  # result = 15
-    print(calc.result)  # 15
+    calc.add(10)
+    calc.power(2)
+    calc.subtract(5)
+    print(calc.result)
+    
+    print(calc.calculate_expression("2 + 3 * 4"))
+    # print(calc.calculate_expression("__import__('os').system('echo \"보안 취약점!\"')"))
+    
+    print(calc.square(4))
+    print(calc.cube(3))
     
     # 히스토리 출력
     print(calc.get_history()) 
