@@ -3,6 +3,7 @@ import requests
 import re
 from openai import OpenAI
 import json
+import time
 
 # 환경 변수
 repo = os.getenv('GITHUB_REPOSITORY')
@@ -13,24 +14,42 @@ openai_api_key = os.getenv('OPENAI_API_KEY')
 # 봇 식별자 - 리뷰에 추가될 태그
 BOT_SIGNATURE = "<!-- auto-review-bot -->"
 
+# 디버그 모드 - 자세한 로깅을 위한 설정
+DEBUG_MODE = True
+
 # GitHub API 헤더
 github_headers = {
     'Authorization': f'Bearer {github_token}',
     'Accept': 'application/vnd.github.v3+json'
 }
 
+# 로깅 함수
+def log_info(message):
+    print(f"INFO: {message}")
+
+def log_debug(message):
+    if DEBUG_MODE:
+        print(f"DEBUG: {message}")
+
+def log_error(message):
+    print(f"ERROR: {message}")
+
 # PR 정보 가져오기 (commit SHA 포함)
 def get_pr_info():
     pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    log_debug(f"Fetching PR info from: {pr_url}")
+    
     response = requests.get(pr_url, headers=github_headers)
     if response.status_code == 200:
         pr_data = response.json()
+        log_debug(f"Successfully retrieved PR info. Head SHA: {pr_data['head']['sha']}")
         return {
             'head_sha': pr_data['head']['sha'],
             'base_sha': pr_data['base']['sha']
         }
     else:
-        print(f"Failed to get PR info (status code: {response.status_code})")
+        log_error(f"Failed to get PR info (status code: {response.status_code})")
+        log_debug(f"Response: {response.text}")
         return None
 
 # diff 가져오기
@@ -40,11 +59,15 @@ def get_diff():
         'Accept': 'application/vnd.github.v3.diff'
     }
     diff_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}"
+    log_debug(f"Fetching diff from: {diff_url}")
+    
     response = requests.get(diff_url, headers=diff_headers)
     if response.status_code == 200:
+        log_debug("Successfully retrieved diff")
         return response.text
     else:
-        print(f"Failed to get diff (status code: {response.status_code})")
+        log_error(f"Failed to get diff (status code: {response.status_code})")
+        log_debug(f"Response: {response.text}")
         return None
 
 # diff 파싱하여 파일별 변경 라인 정보 추출
@@ -225,6 +248,11 @@ def parse_ai_response(response_text, file_changes):
                 # TODO: 코드 내용 기반 라인 번호 추측 로직 개선
                 pass
     
+    # 섹션이 없는 경우 또는 파싱에 실패한 경우 대안 방법 시도
+    if not issues:
+        log_debug("Regular section parsing failed, trying alternative method")
+        # 여기에 대안 파싱 방법 추가 가능
+    
     return issues
 
 # 이슈 요약 생성 함수
@@ -249,108 +277,158 @@ def generate_summary(issues):
     summary += "\n각 이슈에 대한 상세 내용은 인라인 코멘트를 참조하세요."
     return summary
 
-# 기존 봇 리뷰 가져오기
-def get_existing_bot_reviews():
+# 모든 기존 PR 코멘트 가져오기 (삭제 대상)
+def get_all_comments():
+    comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+    log_debug(f"Fetching all PR comments from: {comments_url}")
+    
+    all_comments = []
+    page = 1
+    per_page = 100
+    
+    while True:
+        params = {'per_page': per_page, 'page': page}
+        response = requests.get(comments_url, headers=github_headers, params=params)
+        
+        if response.status_code != 200:
+            log_error(f"Failed to get comments (status code: {response.status_code})")
+            log_debug(f"Response: {response.text}")
+            break
+        
+        comments = response.json()
+        all_comments.extend(comments)
+        
+        if len(comments) < per_page:
+            break
+            
+        page += 1
+    
+    log_info(f"Retrieved {len(all_comments)} total PR comments")
+    return all_comments
+
+# 모든 기존 PR 리뷰 가져오기 (삭제 대상)
+def get_all_reviews():
     reviews_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
-    response = requests.get(reviews_url, headers=github_headers)
+    log_debug(f"Fetching all PR reviews from: {reviews_url}")
     
-    if response.status_code != 200:
-        print(f"Failed to get existing reviews (status code: {response.status_code})")
-        return []
+    all_reviews = []
+    page = 1
+    per_page = 100
     
-    reviews = response.json()
-    bot_reviews = []
+    while True:
+        params = {'per_page': per_page, 'page': page}
+        response = requests.get(reviews_url, headers=github_headers, params=params)
+        
+        if response.status_code != 200:
+            log_error(f"Failed to get reviews (status code: {response.status_code})")
+            log_debug(f"Response: {response.text}")
+            break
+        
+        reviews = response.json()
+        all_reviews.extend(reviews)
+        
+        if len(reviews) < per_page:
+            break
+            
+        page += 1
     
-    # 코멘트 내용 가져오기
-    for review in reviews:
+    log_info(f"Retrieved {len(all_reviews)} total PR reviews")
+    return all_reviews
+
+# 봇 코멘트인지 확인
+def is_bot_comment(comment):
+    return BOT_SIGNATURE in comment.get('body', '')
+
+# 봇 코멘트 전체 삭제
+def delete_all_bot_comments():
+    all_comments = get_all_comments()
+    log_info(f"Checking {len(all_comments)} comments for deletion")
+    
+    deleted_count = 0
+    for comment in all_comments:
+        comment_id = comment.get('id')
+        if comment_id and is_bot_comment(comment):
+            log_debug(f"Deleting bot comment {comment_id}")
+            
+            delete_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
+            response = requests.delete(delete_url, headers=github_headers)
+            
+            if response.status_code == 204:  # 204 No Content는 성공적인 삭제를 의미
+                log_info(f"Successfully deleted comment {comment_id}")
+                deleted_count += 1
+            else:
+                log_error(f"Failed to delete comment {comment_id} (status code: {response.status_code})")
+                log_debug(f"Response: {response.text}")
+    
+    log_info(f"Deleted {deleted_count} bot comments")
+    return deleted_count
+
+# 봇 리뷰 전체 삭제/dismiss
+def dismiss_all_bot_reviews():
+    all_reviews = get_all_reviews()
+    log_info(f"Checking {len(all_reviews)} reviews for dismissal")
+    
+    dismissed_count = 0
+    for review in all_reviews:
         review_id = review.get('id')
         if not review_id:
             continue
             
-        # 리뷰 코멘트 가져오기
-        comments_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}"
-        comments_response = requests.get(comments_url, headers=github_headers)
+        # 리뷰 세부 정보 가져오기
+        review_detail_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}"
+        detail_response = requests.get(review_detail_url, headers=github_headers)
         
-        if comments_response.status_code == 200:
-            review_data = comments_response.json()
-            body = review_data.get('body', '')
+        if detail_response.status_code != 200:
+            log_error(f"Failed to get review details for {review_id} (status code: {detail_response.status_code})")
+            continue
             
-            # 봇 시그니처가 포함된 리뷰 식별
-            if BOT_SIGNATURE in body:
-                bot_reviews.append(review_id)
-    
-    return bot_reviews
-
-# 봇 리뷰 삭제하기
-def delete_bot_reviews(review_ids):
-    for review_id in review_ids:
-        # GitHub API는 리뷰 자체를 삭제하는 엔드포인트를 제공하지 않으므로 
-        # 리뷰를 숨기거나 (dismiss) 빈 내용으로 업데이트하는 방식 사용
-        dismiss_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals"
-        dismiss_data = {
-            'message': '이전 자동 리뷰를 대체합니다.',
-            'event': 'DISMISS'
-        }
+        review_body = detail_response.json().get('body', '')
         
-        response = requests.put(dismiss_url, headers=github_headers, json=dismiss_data)
-        if response.status_code == 200:
-            print(f"Successfully dismissed review {review_id}")
-        else:
-            print(f"Failed to dismiss review {review_id} (status code: {response.status_code})")
-            print(f"Error details: {response.text}")
-
-# 일반 PR 코멘트 처리
-def get_existing_bot_comments():
-    comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
-    response = requests.get(comments_url, headers=github_headers)
+        # 봇 리뷰인지 확인
+        if BOT_SIGNATURE in review_body:
+            log_debug(f"Dismissing bot review {review_id}")
+            
+            dismiss_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals"
+            dismiss_data = {
+                'message': '이전 자동 리뷰를 대체합니다.',
+                'event': 'DISMISS'
+            }
+            
+            response = requests.put(dismiss_url, headers=github_headers, json=dismiss_data)
+            
+            if response.status_code == 200:
+                log_info(f"Successfully dismissed review {review_id}")
+                dismissed_count += 1
+            else:
+                log_error(f"Failed to dismiss review {review_id} (status code: {response.status_code})")
+                log_debug(f"Response: {response.text}")
     
-    if response.status_code != 200:
-        print(f"Failed to get existing comments (status code: {response.status_code})")
-        return []
-    
-    comments = response.json()
-    bot_comments = []
-    
-    for comment in comments:
-        comment_id = comment.get('id')
-        body = comment.get('body', '')
-        
-        if BOT_SIGNATURE in body:
-            bot_comments.append(comment_id)
-    
-    return bot_comments
-
-# 봇 코멘트 삭제하기
-def delete_bot_comments(comment_ids):
-    for comment_id in comment_ids:
-        delete_url = f"https://api.github.com/repos/{repo}/issues/comments/{comment_id}"
-        response = requests.delete(delete_url, headers=github_headers)
-        
-        if response.status_code == 204:  # 204 No Content는 성공적인 삭제를 의미
-            print(f"Successfully deleted comment {comment_id}")
-        else:
-            print(f"Failed to delete comment {comment_id} (status code: {response.status_code})")
+    log_info(f"Dismissed {dismissed_count} bot reviews")
+    return dismissed_count
 
 # GitHub PR에 인라인 코멘트 남기기
 def post_review_comments(commit_sha, issues, overall_comment):
-    # 이전 봇 리뷰 삭제
+    # 이전 봇 코멘트/리뷰 삭제
+    log_info("Starting cleanup of previous bot comments and reviews")
     try:
-        # 기존 봇 리뷰 가져오기
-        bot_reviews = get_existing_bot_reviews()
-        if bot_reviews:
-            print(f"Found {len(bot_reviews)} existing bot reviews")
-            delete_bot_reviews(bot_reviews)
+        # 기존 봇 코멘트 모두 삭제
+        deleted_comments = delete_all_bot_comments()
+        log_info(f"Deleted {deleted_comments} bot comments")
         
-        # 기존 봇 코멘트 가져오기
-        bot_comments = get_existing_bot_comments()
-        if bot_comments:
-            print(f"Found {len(bot_comments)} existing bot comments")
-            delete_bot_comments(bot_comments)
+        # 기존 봇 리뷰 모두 dismiss
+        dismissed_reviews = dismiss_all_bot_reviews()
+        log_info(f"Dismissed {dismissed_reviews} bot reviews")
+        
+        # 삭제 작업 후 약간의 대기 시간 추가 (GitHub API 반영 시간 고려)
+        if deleted_comments > 0 or dismissed_reviews > 0:
+            log_info("Waiting for GitHub API to process deletions...")
+            time.sleep(2)
     except Exception as e:
-        print(f"Error cleaning up previous reviews/comments: {str(e)}")
+        log_error(f"Error cleaning up previous comments/reviews: {str(e)}")
     
     # 리뷰 생성
     review_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
+    log_debug(f"Creating review at: {review_url}")
     
     # 간략한 요약 생성
     summary = generate_summary(issues)
@@ -377,6 +455,8 @@ def post_review_comments(commit_sha, issues, overall_comment):
                 'body': comment_body
             })
     
+    log_debug(f"Prepared {len(comments)} inline comments")
+    
     # 리뷰 데이터 구성
     review_data = {
         'commit_id': commit_sha,
@@ -387,20 +467,29 @@ def post_review_comments(commit_sha, issues, overall_comment):
     
     # 인라인 코멘트가 없으면 일반 PR 코멘트로 대체
     if not comments:
+        log_info("No inline comments to post, using regular PR comment instead")
         comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
         comment_data = {'body': f"{BOT_SIGNATURE}\n\n{overall_comment}"}
+        
         response = requests.post(comment_url, headers=github_headers, json=comment_data)
-        print(f"Comment posting result: {response.status_code}")
+        log_info(f"Comment posting result: {response.status_code}")
+        
+        if response.status_code != 201:
+            log_error(f"Failed to post comment: {response.text}")
         return
     
     # 리뷰 및 인라인 코멘트 게시
+    log_debug(f"Posting review with {len(comments)} inline comments")
     response = requests.post(review_url, headers=github_headers, json=review_data)
-    print(f"Review posting result: {response.status_code}")
+    log_info(f"Review posting result: {response.status_code}")
+    
     if response.status_code != 201:
-        print(f"Error details: {response.text}")
+        log_error(f"Error details: {response.text}")
 
 # Main 실행 코드
 try:
+    log_info("Starting code review process")
+    
     # PR 정보 및 diff 가져오기
     pr_info = get_pr_info()
     if not pr_info:
@@ -410,12 +499,13 @@ try:
     if not diff:
         raise Exception("Failed to get diff")
     
-    print(f"Review target diff:\n{diff}")
+    log_debug(f"Review target diff:\n{diff}")
     
     # diff 파싱
     file_changes = parse_diff(diff)
     
     # OpenAI 리뷰 요청
+    log_info("Requesting code review from OpenAI API")
     openai_client = OpenAI(api_key=openai_api_key)
     prompt = f"""Review the following code changes thoroughly and critically. Look for ALL possible issues including:
 
@@ -469,21 +559,27 @@ Here are the code changes to review:
         max_tokens=1000  # 더 많은 토큰을 허용하여 상세한 리뷰 생성
     )
     review_comment = response.choices[0].message.content
+    log_debug(f"OpenAI response:\n{review_comment}")
     
     # OpenAI 응답 파싱
     issues = parse_ai_response(review_comment, file_changes)
+    log_info(f"Parsed {len(issues)} issues from OpenAI response")
     
     # 리뷰 코멘트 게시
+    log_info("Posting review comments")
     post_review_comments(pr_info['head_sha'], issues, review_comment)
     
+    log_info("Code review process completed successfully")
+    
 except Exception as e:
-    print(f"Error: {str(e)}")
+    log_error(f"Error: {str(e)}")
     
     # 오류 발생 시, 기존 방식으로 일반 코멘트 게시 (fallback)
     try:
+        log_info("Attempting to post fallback comment")
         comment_url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
         comment_data = {'body': f"{BOT_SIGNATURE}\n\nCode review failed: {str(e)}\n\nIf available, here's the review:\n\n{review_comment if 'review_comment' in locals() else 'No review available'}"} 
         response = requests.post(comment_url, headers=github_headers, json=comment_data)
-        print(f"Fallback comment posting result: {response.status_code}")
+        log_info(f"Fallback comment posting result: {response.status_code}")
     except Exception as fallback_e:
-        print(f"Fallback also failed: {str(fallback_e)}") 
+        log_error(f"Fallback also failed: {str(fallback_e)}") 
