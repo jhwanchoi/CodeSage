@@ -169,6 +169,131 @@ def analyze_file_diff(diff_lines):
     
     return changes
 
+# OpenAI 리뷰 요청
+def get_code_review(diff):
+    log_info("Requesting code review from OpenAI API")
+    openai_client = OpenAI(api_key=openai_api_key)
+    
+    # 상세한 프롬프트로 변경
+    prompt = f"""코드 변경 사항을 리뷰하고 중요한 문제점을 상세하게 분석해주세요:
+
+1. 각 문제점에 대해 다음 형식을 정확히 사용하세요:
+- 파일: [파일명], 라인: [라인번호]
+- 유형: [보안/성능/논리/품질] 중 하나를 선택
+- 이슈: [상세한 문제 설명 - 구체적으로 무엇이 문제인지, 왜 문제인지, 어떤 영향이 있는지 기술]
+- 해결: [구체적인 해결 방법 - 정확히 어떻게 코드를 수정해야 하는지 예시 코드 포함]
+
+2. 중요도 순서로 최대 5개 이슈만 알려주세요.
+3. 무조건 파일명과 라인 번호를 명시해 주세요.
+4. 모든 이슈에 최소 3문장 이상의 상세한 설명과 구체적인 해결 방법을 제공해주세요.
+5. 일반적인 조언이나 모호한 설명은 완전히 피하고, 코드의 특정 문제를 정확히 지적해주세요.
+6. 해결 방법에는 가능한 실제 코드 예시를 포함해주세요.
+
+다음 코드 변경 사항을 리뷰하세요:
+
+{diff}"""
+    
+    # OpenAI API에 리뷰 요청
+    response = openai_client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500  # 응답 토큰 증가
+    )
+    review_comment = response.choices[0].message.content
+    log_debug(f"OpenAI response:\n{review_comment}")
+    
+    return review_comment
+
+# 리뷰받은 이슈에 대해 더 상세한 분석 요청
+def get_detailed_issue_analysis(issue, file_content):
+    if not issue.get('file') or not issue.get('line') or not file_content:
+        return issue
+    
+    openai_client = OpenAI(api_key=openai_api_key)
+    
+    # 파일 내용과 이슈 정보를 바탕으로 상세 분석 요청
+    line_num = issue.get('line', 0)
+    
+    # 해당 라인 주변 10줄 컨텍스트 추출
+    lines = file_content.splitlines()
+    start_line = max(0, line_num - 5)
+    end_line = min(len(lines), line_num + 5)
+    
+    context_lines = []
+    for i in range(start_line, end_line):
+        prefix = ">>> " if i + 1 == line_num else "    "
+        context_lines.append(f"{prefix}{i+1}: {lines[i]}")
+    
+    code_context = "\n".join(context_lines)
+    
+    prompt = f"""다음 코드의 {line_num}번 라인에서 발견된 이슈에 대해 상세 분석이 필요합니다:
+
+```
+{code_context}
+```
+
+이슈 유형: {issue.get('type', '일반')}
+현재 설명: {issue.get('description', '설명 없음')}
+현재 해결책: {issue.get('recommendation', '해결책 없음')}
+
+위 코드와 라인을 면밀히 분석하여 다음 정보를 제공해주세요:
+1. 정확히 어떤 문제가 있는지 (최소 3문장 이상으로 상세히)
+2. 이 문제가 왜 중요한지, 어떤 영향을 미치는지
+3. 구체적인 해결 방법 (가능하면 수정된 코드 예시 포함)
+
+중요: 일반적인 설명이나 모호한 조언은 피하고, 이 특정 코드에 맞춘 구체적인 분석을 제공해주세요.
+"""
+    
+    # OpenAI API에 상세 분석 요청
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000
+        )
+        detailed_analysis = response.choices[0].message.content
+        log_debug(f"Detailed analysis for line {line_num}:\n{detailed_analysis}")
+        
+        # 상세 분석에서 설명과 해결책 추출
+        description_match = re.search(r'1\.\s+(.*?)(?=2\.)', detailed_analysis, re.DOTALL)
+        impact_match = re.search(r'2\.\s+(.*?)(?=3\.)', detailed_analysis, re.DOTALL)
+        solution_match = re.search(r'3\.\s+(.*)', detailed_analysis, re.DOTALL)
+        
+        new_description = ""
+        if description_match:
+            new_description = description_match.group(1).strip()
+        if impact_match:
+            new_description += "\n\n영향: " + impact_match.group(1).strip()
+            
+        new_recommendation = solution_match.group(1).strip() if solution_match else issue.get('recommendation', '')
+        
+        # 충분히 상세하게 추출된 경우에만 업데이트
+        if len(new_description) > 50:
+            issue['description'] = new_description
+        if len(new_recommendation) > 50:
+            issue['recommendation'] = new_recommendation
+            
+    except Exception as e:
+        log_error(f"Error getting detailed analysis: {str(e)}")
+    
+    return issue
+
+# 파일 내용 읽기
+def get_file_content(file_path):
+    try:
+        # 프로젝트 루트 기준 경로 처리
+        if file_path.startswith('/'):
+            full_path = file_path
+        else:
+            # GitHub Actions에서는 워크스페이스 기준 경로로 접근
+            full_path = os.path.join(os.environ.get('GITHUB_WORKSPACE', ''), file_path)
+            
+        with open(full_path, 'r') as file:
+            return file.read()
+    except Exception as e:
+        log_error(f"Error reading file {file_path}: {str(e)}")
+        return None
+
 # OpenAI 응답 파싱 및 이슈-파일-라인 연결
 def parse_ai_response(response_text, file_changes):
     # 간단한 패턴 매칭을 통한 파일 및 라인 번호 추출
@@ -672,40 +797,20 @@ try:
     # diff 파싱
     file_changes = parse_diff(diff)
     
-    # OpenAI 리뷰 요청
-    log_info("Requesting code review from OpenAI API")
-    openai_client = OpenAI(api_key=openai_api_key)
-    
-    # 간결한 프롬프트로 변경
-    prompt = f"""코드 변경 사항을 리뷰하고 중요한 문제점만 간결하게 알려주세요:
-
-1. 각 문제점에 대해 다음 형식을 사용하세요:
-- 파일: [파일명], 라인: [라인번호]
-- 유형: [보안/성능/논리/품질] 중 선택
-- 이슈: [문제에 대한 상세한 설명 - 무엇이 문제인지, 왜 문제인지 설명]
-- 해결: [구체적인 해결 방법 - 어떻게 수정해야 하는지 명확히 설명]
-
-2. 중요도 순서로 최대 5개 이슈만 알려주세요.
-3. 장황한 설명이나 여러 코드 예제는 필요 없습니다.
-4. 파일명과 라인 번호를 꼭 명시해 주세요.
-5. 모든 이슈에 구체적인 설명과 실용적인 해결 방법을 필수로 작성해 주세요.
-6. 단순히 "이슈가 있습니다"와 같은 모호한 설명은 피하고 구체적으로 적어주세요.
-
-다음 코드 변경 사항을 리뷰하세요:
-
-{diff}"""
-    
-    response = openai_client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1000
-    )
-    review_comment = response.choices[0].message.content
-    log_debug(f"OpenAI response:\n{review_comment}")
+    # OpenAI API로 코드 리뷰 요청
+    review_comment = get_code_review(diff)
     
     # OpenAI 응답 파싱
     issues = parse_ai_response(review_comment, file_changes)
     log_info(f"Parsed {len(issues)} issues from OpenAI response")
+    
+    # 각 이슈에 대해 추가 상세 분석 요청
+    for i, issue in enumerate(issues):
+        if issue.get('file') and issue.get('line'):
+            log_debug(f"Getting detailed analysis for issue {i+1} at {issue['file']}:{issue['line']}")
+            file_content = get_file_content(issue['file'])
+            if file_content:
+                issues[i] = get_detailed_issue_analysis(issue, file_content)
     
     # 각 이슈 정보 로깅
     for i, issue in enumerate(issues):
